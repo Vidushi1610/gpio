@@ -1,72 +1,70 @@
 import cv2
 import dlib
 import RPi.GPIO as GPIO
-import time
+from imutils import face_utils
 
-# Set up GPIO
+# GPIO setup
+GPIO_PIN = 17  # Change this to the appropriate GPIO pin
 GPIO.setmode(GPIO.BCM)
-drowsy_pin = 18  # Example GPIO pin, change to your desired pin
-GPIO.setup(drowsy_pin, GPIO.OUT)
+GPIO.setup(GPIO_PIN, GPIO.OUT)
 
-# Load the face detection model from dlib
+# Initialize dlib's face detector and facial landmarks predictor
 detector = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")  # Download this file
 
-# Load the facial landmarks predictor model
-predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+# Yawning thresholds
+EAR_THRESHOLD = 0.2  # Eye aspect ratio threshold
+YAWN_CONSEC_FRAMES = 15  # Number of consecutive frames for yawn detection
 
-# Load the Yawn and Blink detection models
-yawn_blink_detector = dlib.simple_object_detector("yawn_blink_detector.svm")
+# Calculate the eye aspect ratio (EAR)
+def eye_aspect_ratio(eye):
+    A = distance(eye[1], eye[5])
+    B = distance(eye[2], eye[4])
+    C = distance(eye[0], eye[3])
+    ear = (A + B) / (2.0 * C)
+    return ear
 
-# Open the webcam
+# Calculate Euclidean distance between two points
+def distance(p1, p2):
+    return ((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)**0.5
+
+# Start capturing video
 cap = cv2.VideoCapture(0)
+
+frame_count = 0
+yawn_frames = 0
 
 while True:
     ret, frame = cap.read()
-
     if not ret:
         break
 
-    # Convert the frame to grayscale for face detection
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # Detect faces in the frame
     faces = detector(gray)
 
-    yawn_blink_detected = False
-
     for face in faces:
-        landmarks = predictor(gray, face)
-        landmarks_list = [(landmarks.part(i).x, landmarks.part(i).y) for i in range(68)]
+        shape = predictor(gray, face)
+        shape = face_utils.shape_to_np(shape)
 
-        # Detect yawning and blinking
-        yawn_blink_rects = yawn_blink_detector(frame)
+        left_eye = shape[42:48]
+        right_eye = shape[36:42]
 
-        for rect in yawn_blink_rects:
-            x, y, w, h = rect.left(), rect.top(), rect.width(), rect.height()
+        left_ear = eye_aspect_ratio(left_eye)
+        right_ear = eye_aspect_ratio(right_eye)
+        avg_ear = (left_ear + right_ear) / 2.0
 
-            # Capture image when yawning or blinking
-            yawn_blink_image = frame[y:y+h, x:x+w]
-            cv2.imwrite("yawn_blink_image.jpg", yawn_blink_image)
+        if avg_ear < EAR_THRESHOLD:
+            yawn_frames += 1
+            if yawn_frames >= YAWN_CONSEC_FRAMES:
+                GPIO.output(GPIO_PIN, GPIO.HIGH)  # Turn on alert
+        else:
+            yawn_frames = 0
+            GPIO.output(GPIO_PIN, GPIO.LOW)  # Turn off alert
 
-            yawn_blink_detected = True
-
-            # Draw rectangle around detected yawn/blink
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-    # Display the frame
-    cv2.imshow("Yawn and Blink Detection", frame)
-
+    cv2.imshow("Frame", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-    if yawn_blink_detected:
-        print("Yawn or Blink detected. Image captured.")
-        GPIO.output(drowsy_pin, GPIO.HIGH)
-        time.sleep(1)  # GPIO pin HIGH for 1 second
-        GPIO.output(drowsy_pin, GPIO.LOW)
-        yawn_blink_detected = False
-
-# Release GPIO and close all windows
-GPIO.cleanup()
 cap.release()
 cv2.destroyAllWindows()
+GPIO.cleanup()
